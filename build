@@ -11,7 +11,7 @@
 #    $releasedir  : The directory where the releases will get deployed
 #    $hctoken     : Hipchat token to use for channel notifications
 #    $hcroomid    : Hipchat room id to post the message to
-#    $appdir      : Hipchat token to use for channel notifications
+#    $appdir      : Where the releases are kept during the build process
 #    $encpass     : Open SSL Encryption Key
 . ./config.cfg
 
