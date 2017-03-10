@@ -1,0 +1,239 @@
+#!/bin/bash
+
+# The config file includes the following
+# params:
+#    $gituri      : The URI for the git repo.  Something like git@bitbucket.org/[yourcompany]
+#    $s3bucket    : The s3bucket where the releases will be stored.
+#    $releasedir  : The directory where the releases will get deployed
+#    $hctoken     : Hipchat token to use for channel notifications
+#    $hcroomid    : Hipchat room id to post the message to
+#    $appdir      : Hipchat token to use for channel notifications
+#    $encpass     : Open SSL Encryption Key
+. ./config.cfg
+
+# --------------------------------------------------------------------------------------
+# Pulls release from S3 and deploys it to release folder.
+# --------------------------------------------------------------------------------------
+
+# Project & Version Passed into Script.
+project=$1
+
+# Configuration
+s3path=s3://$s3bucket/$project
+gitrepo=$gituri/$project.git
+projdir=$appdir/$project
+version=""
+
+if [ -f "$projdir.version" ]; then
+    version=`cat $projdir.version | awk '{print $1}'`
+    md5=`cat $projdir.version | awk '{print $2}'`
+else
+    pushd "$releasedir/$project"
+    version=`pwd -P | grep -Eo '[^/]+/?$' | cut -d / -f1`
+    pushd
+fi
+
+# Notify hipchat that a release was pushed
+# params:
+#     $1 (_room)    : Room to notify.  Options are [development, releases]
+#     $2 (_message) : Message to send to the room.
+function notifyhipchat ()
+{
+    local \
+        _room="$hcroomid" \
+        _token="$hctoken" \
+        _message="$1"
+
+    curl -H "Content-Type: application/json" \
+        -X POST \
+        -d "{\"color\": \"green\", \"message_format\": \"text\", \"message\": \"$_message\" }" \
+        https://api.hipchat.com/v2/room/$_room/notification?auth_token=$_token
+}
+
+# Executes a function as sudo.
+# params:
+#     $1 (_func)  : The name of the function inside the script to execute.
+#     $2+ (_args) : Args that are used by the passed to func
+function sudoexec ()
+{
+    local \
+        _func="$1" \
+        _args=( "$@" )
+
+    # Temp file to store the script that gets executed.
+    local _tmp="/dev/shm/$RANDOM"
+    local _tmpconfig="$RANDOM"
+
+    # Copy the config so we have access to those vars within sudo'ed function.
+    cp ./config.cfg "/dev/shm/$_tmpconfig"
+
+    # Script data that will be executed
+    local _data
+
+    # Remove the func name from the params array.
+    unset _args[0]
+
+    _data="#!/bin/bash\n\n"
+    _data=". ./$_tmpconfig\n\n"
+    _data="${_data}_args=(\n"
+
+    # Add each param to content.  If the param is a string, we have to wrap it in quotes.
+    for param in "${_args[@]}"
+    do
+        if [[ "$param" =~ "\s+" ]]; then
+            _data="${_data}\t\"${param}\"\n"
+        else
+            _data="${_data}\t${param}\n"
+        fi
+    done
+
+    _data="${_data})\n"
+
+    # Push script data to temp file.
+    echo -e "$_data" > "$_tmp"
+    echo "#$( type "$_func" )" >> "$_tmp"
+    echo -e "\n$_func \"\${_args[@]}\"\n" >> "$_tmp"
+
+    # Execute the script
+    sudo bash "$_tmp"
+
+    # Cleanup Temp File.
+    rm "$_tmp"
+    rm "/dev/shm/$_tmpconfig"
+}
+
+# Outputs message to stdout.
+# params:
+#     $1 (_type) : Type of message.  Options are [error, warn, status, arg]
+#     $2 (_text) : Message text to output.
+#     $3 (_arg)  : OPTIONAL - only required when using the [arg] type.
+function msg()
+{
+    local \
+        _type="$1" \
+        _text="$2"
+
+    local _color
+
+    if [ "$_type" = "error" ]; then
+        _color="\e[38;5;196m"
+        _text="Error: ${_text}"
+    elif [ "$_type" = "warn" ]; then
+        _color="\e[38;5;186m"
+        _text="Warn: ${_text}"
+    elif [ "$_type" = "status" ]; then
+        _color="\e[38;5;226m"
+        _text="Status: ${_text}"
+    elif [ "$_type" = "arg" ]; then
+        local _arg="$3"
+        _color="\e[38;5;202m"
+        _text="${_text}: \e[0m${_arg}"
+    fi
+
+    echo -e "${_color}${_text}\e[0m"
+}
+
+# Deploys the release to the release folder.
+# params:
+#    $1 (_project) : The name of the project to release.
+#    $2 (_version) : The version to deploy
+#    $3 (_projdir) : The directory where the project zip resides.
+function release ()
+{
+    local params=( "$@" )
+
+    local \
+        _project="${params[0]}" \
+        _version="${params[1]}" \
+        _projdir="${params[2]}"
+
+    if [ ! -d "$releasedir/releases/$_project/$_version" ]; then
+        mkdir -p "$releasedir/releases/$_project/$_version"
+    fi
+
+    unzip -q $_projdir/$_version.zip -d "$releasedir/releases/$_project/$_version"
+
+    local _existing=`find $releasedir/releases/$_project/ -maxdepth 1 -mindepth 1 -type d -printf '%f\n'`
+
+    for ver in $_existing ; do
+        if [ "$ver" != "$_version" ]; then
+            rm -rf $releasedir/releases/$_project/$ver
+        fi
+    done
+
+    if [ -f "$_projdir.env" ]; then
+        cp "$_projdir.env" "$releasedir/releases/$_project/$_version/.env"
+    fi
+
+    ln -sfn "$releasedir/releases/$_project/$_version" "$releasedir/$_project"
+
+    chown -R "www-data:www-data" "$releasedir/$_project"
+    chown -R "www-data:www-data" "$releasedir/releases/$_project/$_version"
+}
+
+if [ -z $1 ]; then
+    msg "error" "You did not specify a project to release."
+    exit 1
+fi
+
+remotemd5=`s3cmd info $s3path/$project.version | grep 'MD5' | awk '{print $3}'`
+
+if [[ "$remotemd5" =~ "ERROR+" ]]; then
+    msg "error" "Version file does not exist for project $project"
+    exit 1
+fi
+
+if [ ! -z $version ]; then
+    if [ "$remotemd5" = "$md5" ]; then
+        msg "status" "Version is the same, no need to update the release"
+        msg "arg" "Project" "$project"
+        msg "arg" "MD5" "$remotemd5"
+        msg "arg" "Current Version" "$version"
+        exit 1
+    fi
+fi
+
+msg "arg" "Project" "$project"
+msg "arg" "MD5" "$remotemd5"
+msg "arg" "Current Version" "$version"
+
+s3cmd get --force $s3path/$project.version /tmp/$project.version
+
+version=`cat /tmp/$project.version`
+msg "arg" "New Version" "$version"
+
+if [ ! -d "$projdir/" ]; then
+    mkdir -p $projdir/
+fi
+
+if [ -d "$releasedir/releases/$_project/$_version" ]; then
+    msg "warn" "Release Failed.  The being deployed is already the current deployed version.  Was the version file deleted?"
+    msg "status" "Version file was re-created to the version currently deployed."
+    echo -e "$version\t$remotemd5" > $projdir.version
+    exit 1;
+fi
+
+envfile=`s3cmd info $s3path/$project.env | grep 'MD5' | awk '{print $3}'`
+
+if [[ "$remotemd5" =~ "ERROR+" ]]; then
+    msg "warn" "No env file existed for this project.  Project may not load without it."
+else
+    s3cmd get --force $s3path/$project.env $projdir.env
+    echo "s3cmd get --force $s3path/$project.env $projdir.env"
+    echo "$encpass" | openssl enc -in $projdir.env -d -aes-256-cbc -pass stdin > $projdir.env.out
+    mv $projdir.env.out $projdir.env
+fi
+
+rm /tmp/$project.version
+
+echo -e "$version\t$remotemd5" > $projdir.version
+
+if [ ! -d "$projdir/" ]; then
+    mkdir -p $projdir/
+fi
+
+s3cmd get --force $s3path/releases/$version.zip $projdir/$version.zip
+
+msg "status" "Deploying release..."
+
+sudoexec "release" "$project" "$version" "$projdir"
