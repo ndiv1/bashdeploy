@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# The config file includes the following
+# params:
+#    $gituri      : The URI for the git repo.  Something like git@bitbucket.org/[yourcompany]
+#    $s3bucket    : The s3bucket where the releases will be stored.
+#    $releasedir  : The directory where the releases will get deployed
+#    $hctoken     : Hipchat token to use for channel notifications
+#    $hcroomid    : Hipchat room id to post the message to
+#    $appdir      : Hipchat token to use for channel notifications
+#    $encpass     : Open SSL Encryption Key
+. ./config.cfg
+
+project="$1"
+envfile="$2"
+passkey="$3"
+
+s3path="s3://$s3bucket/$project"
+
+echo "$encpass" | openssl enc -in $envfile -aes-256-cbc -pass stdin > /tmp/$envfile
+s3cmd put /tmp/$envfile $s3path/$envfile
+rm /tmp/$envfile
