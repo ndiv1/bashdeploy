@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# --------------------------------------------------------------------------------------
+# This script is responsible for building a release and deploying it to S3.
+# --------------------------------------------------------------------------------------
+
+# The config file includes the following
+# params:
+#    $gituri      : The URI for the git repo.  Something like git@bitbucket.org/[yourcompany]
+#    $s3bucket    : The s3bucket where the releases will be stored.
+#    $releasedir  : The directory where the releases will get deployed
+#    $hctoken     : Hipchat token to use for channel notifications
+#    $hcroomid    : Hipchat room id to post the message to
+#    $appdir      : Hipchat token to use for channel notifications
+#    $encpass     : Open SSL Encryption Key
+. ./config.cfg
+
+# Project & Version Passed into Script.
+project=$1
+version=$2
+
+# Configuration
+s3path=s3://$s3bucket/$project
+gitrepo=$gituri/$project.git
+projdir=~/.release/$project
+
+# Notify hipchat that a release was pushed
+# params:
+#     $1 (_room)    : Room to notify.  Options are [development, releases]
+#    $2 (_message) : Message to send to the room.
+function notifyhipchat ()
+{
+    local \
+        _room="$hcroomid" \
+        _token="$hctoken" \
+        _message="$1"
+
+    curl -H "Content-Type: application/json" \
+        -X POST \
+        -d "{\"color\": \"green\", \"message_format\": \"text\", \"message\": \"$_message\" }" \
+        https://api.hipchat.com/v2/room/$_room/notification?auth_token=$_token
+}
+
+# Outputs message to stdout.
+# params:
+#     $1 (_type) : Type of message.  Options are [error, warn, status, arg]
+#    $2 (_text) : Message text to output.
+#    $3 (_arg)  : OPTIONAL - only required when using the [arg] type.
+function msg()
+{
+    local \
+        _type="$1" \
+        _text="$2"
+
+    local _color
+
+    if [ "$_type" = "error" ]; then
+        _color="\e[38;5;196m"
+        _text="Error: ${_text}"
+    elif [ "$_type" = "warn" ]; then
+        _color="\e[38;5;186m"
+        _text="Warn: ${_text}"
+    elif [ "$_type" = "status" ]; then
+        _color="\e[38;5;226m"
+        _text="Status: ${_text}"
+    elif [ "$_type" = "arg" ]; then
+        local _arg="$3"
+        _color="\e[38;5;202m"
+        _text="${_text}: \e[0m${_arg}"
+    fi
+
+    echo -e "${_color}${_text}\e[0m"
+}
+
+function build ()
+{
+    cd $projdir/src
+
+    if [ -f "../$version.zip" ]; then
+        msg "warn" "$project/$version already built.  Skipping build."
+    else
+        git fetch -at
+        git checkout -f tags/$version
+
+        composer -v install
+
+        cd $projdir/src
+        msg "status" "Compressing output..."
+        zip -9 -qr --exclude=composer* --exclude=*.git* ../$version.zip ./
+    fi
+
+    echo "$version" > $projdir/$project.version
+}
+
+function s3put ()
+{
+    local \
+        _file="$1"
+
+    local _exists=`s3cmd ls $s3path/releases/$version.zip | wc -l`
+
+    if [[ $_exists -gt 0 ]]; then
+        msg "warn" "Release has already been pushed to S3.  Skipping push."
+    else
+        s3cmd put $_file $s3path/releases/$version.zip
+    fi
+
+    s3cmd put $projdir/$project.version $s3path/$project.version
+}
+
+function setupproj ()
+{
+    mkdir -p $projdir/src
+    git clone $gitrepo $projdir/src/
+}
+
+if [ -z $1 ]; then
+    msg "error" "You did not specify a project to release."
+    exit 1
+fi
+
+if [ -z $2 ]; then
+    msg "error" "You did not specify a version to release."
+    exit 1
+fi
+
+msg "arg" "Project" "$project"
+msg "arg" "Version" "$version"
+
+if [ ! -d "$projdir/src" ]; then
+    msg "warn" "Project isn't configured, trying to set it up."
+    setupproj
+
+    if [ ! -d "$projdir/src" ]; then
+        msg "error" "Unable to setup project.  Set it up manually before running again"
+        exit 1
+    fi
+fi
+
+msg "status" "Building $project/$version..."
+build $projdir $ver
+
+s3put $projdir/$version.zip
+notifyhipchat "$project: Version $version was pushed to s3!"
