@@ -11,6 +11,7 @@ basedir="`dirname \"$0\"`"
 #    $hcroomid    : Hipchat room id to post the message to
 #    $appdir      : Where the releases are kept during the build process
 #    $encpass     : Open SSL Encryption Key
+#    $usergrp     : User and group the webserver runs with (www-data:www-data)
 . $basedir/config.cfg
 
 # --------------------------------------------------------------------------------------
@@ -30,9 +31,11 @@ if [ -f "$projdir.version" ]; then
     version=`cat $projdir.version | awk '{print $1}'`
     md5=`cat $projdir.version | awk '{print $2}'`
 else
-    pushd "$releasedir/$project"
-    version=`pwd -P | grep -Eo '[^/]+/?$' | cut -d / -f1`
-    pushd
+    if [ -d "$releasedir/$project" ]; then
+        pushd "$releasedir/$project"
+        version=`pwd -P | grep -Eo '[^/]+/?$' | cut -d / -f1`
+        pushd
+    fi
 fi
 
 # Notify hipchat that a release was pushed
@@ -64,10 +67,10 @@ function sudoexec ()
 
     # Temp file to store the script that gets executed.
     local _tmp="/dev/shm/$RANDOM"
-    local _tmpconfig="$RANDOM"
+    local _tmpconfig="/dev/shm/$RANDOM.cfg"
 
     # Copy the config so we have access to those vars within sudo'ed function.
-    cp ./config.cfg "/dev/shm/$_tmpconfig"
+    cp $basedir/config.cfg $_tmpconfig
 
     # Script data that will be executed
     local _data
@@ -76,7 +79,7 @@ function sudoexec ()
     unset _args[0]
 
     _data="#!/bin/bash\n\n"
-    _data=". ./$_tmpconfig\n\n"
+    _data="${_data}. $_tmpconfig\n\n"
     _data="${_data}_args=(\n"
 
     # Add each param to content.  If the param is a string, we have to wrap it in quotes.
@@ -101,7 +104,7 @@ function sudoexec ()
 
     # Cleanup Temp File.
     rm "$_tmp"
-    rm "/dev/shm/$_tmpconfig"
+    rm "$_tmpconfig"
 }
 
 # Outputs message to stdout.
@@ -169,8 +172,8 @@ function release ()
 
     ln -sfn "$releasedir/releases/$_project/$_version" "$releasedir/$_project"
 
-    chown -R "www-data:www-data" "$releasedir/$_project"
-    chown -R "www-data:www-data" "$releasedir/releases/$_project/$_version"
+    chown -R "$usergrp" "$releasedir/$_project"
+    chown -R "$usergrp" "$releasedir/releases/$_project/$_version"
 }
 
 if [ -z $1 ]; then
@@ -208,7 +211,7 @@ if [ ! -d "$projdir/" ]; then
     mkdir -p $projdir/
 fi
 
-if [ -d "$releasedir/releases/$_project/$_version" ]; then
+if [ -d "$releasedir/releases/$project/$version" ]; then
     msg "warn" "Release Failed.  The being deployed is already the current deployed version.  Was the version file deleted?"
     msg "status" "Version file was re-created to the version currently deployed."
     echo -e "$version\t$remotemd5" > $projdir.version
@@ -239,3 +242,4 @@ s3cmd get --force $s3path/releases/$version.zip $projdir/$version.zip
 msg "status" "Deploying release..."
 
 sudoexec "release" "$project" "$version" "$projdir"
+notifyhipchat "$project: $(hostname -i) updated to version $version"
