@@ -220,13 +220,26 @@ fi
 
 envfile=`s3cmd info $s3path/$project.env | grep 'MD5' | awk '{print $3}'`
 
-if [[ "$remotemd5" =~ "ERROR+" ]]; then
+if [[ "$envfile" =~ "ERROR+" ]]; then
     msg "warn" "No env file existed for this project.  Project may not load without it."
 else
     s3cmd get --force $s3path/$project.env $projdir.env
     echo "s3cmd get --force $s3path/$project.env $projdir.env"
     echo "$encpass" | openssl enc -in $projdir.env -d -aes-256-cbc -pass stdin > $projdir.env.out
     mv $projdir.env.out $projdir.env
+fi
+
+setupmd5=`s3cmd info $s3path/$project-env.sh | grep 'MD5' | awk '{print $3}'`
+
+if [[ "$setupmd5" =~ "ERROR+" ]]; then
+    msg "warn" "No env file existed for this project.  Project may not load without it."
+else
+    s3cmd get --force $s3path/$project-env.sh $projdir-env.sh
+    echo "s3cmd get --force $s3path/$project-env.sh $projdir-env.sh"
+
+    if [ -f "$projdir-env.sh" ]; then
+        . $projdir-env.sh
+    fi
 fi
 
 rm /tmp/$project.version
@@ -241,5 +254,14 @@ s3cmd get --force $s3path/releases/$version.zip $projdir/$version.zip
 
 msg "status" "Deploying release..."
 
+if [ -n "$(type -t prerelease)" ] && [ "$(type -t prerelease)" = function ]; then
+    sudoexec "prerelease" "$project" "$version" "$projdir"
+fi
+
 sudoexec "release" "$project" "$version" "$projdir"
+
+if [ -n "$(type -t postrelease)" ] && [ "$(type -t postrelease)" = function ]; then
+    sudoexec "postrelease" "$project" "$version" "$projdir" "$releasedir"
+fi
+
 notifyhipchat "$project: $(hostname -i) updated to version $version"
